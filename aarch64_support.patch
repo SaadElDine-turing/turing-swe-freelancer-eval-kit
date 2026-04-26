@@ -1,0 +1,470 @@
+diff --git a/project/swelancer/Dockerfile_aarch64_base b/project/swelancer/Dockerfile_aarch64_base
+new file mode 100644
+index 0000000..8603c98
+--- /dev/null
++++ b/project/swelancer/Dockerfile_aarch64_base
+@@ -0,0 +1,212 @@
++# Use an official Ubuntu as a base image
++FROM ubuntu:22.04
++
++# Set environment variables
++ENV DEBIAN_FRONTEND=noninteractive
++ENV NVM_DIR=/root/.nvm
++ENV PYTHONUNBUFFERED=1
++ENV PYTHONPATH=/app/tests
++ENV DISPLAY=:99
++ENV LIBGL_ALWAYS_INDIRECT=1
++ENV PATH="/opt/conda/bin:$PATH"
++ENV PATH="/root/.local/bin:$PATH"
++
++# old: ENV PLAYWRIGHT_BROWSERS_PATH=0
++
++ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
++
++# below possibly unnecessary?
++RUN mkdir -p /ms-playwright
++
++# Update package list and install basic utilities
++RUN apt-get update && apt-get install -y \
++    curl \
++    git \
++    wget \
++    tar \
++    gzip \
++    gnupg \
++    openssh-client \
++    xz-utils \
++    patch \
++    ansible \
++    zip \
++    unzip \
++    --no-install-recommends
++
++# Install Python and related tools
++RUN apt install software-properties-common -y && \
++    add-apt-repository ppa:deadsnakes/ppa -y
++
++RUN apt-get update && apt-get install -y \
++    python3.12 \
++    python3.12-venv \
++    python3.12-dev \
++    --no-install-recommends
++
++# Install conda
++RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-py313_25.5.1-0-Linux-aarch64.sh -O /tmp/miniconda.sh \
++    && bash /tmp/miniconda.sh -b -p /opt/conda \
++    && rm -f /tmp/miniconda.sh \
++    && /opt/conda/bin/conda clean -ya
++ENV PATH="/opt/conda/bin:$PATH"
++RUN /opt/conda/bin/conda init bash
++
++# Copy requirements.txt first
++COPY requirements.txt /tmp/requirements.txt
++
++# Create testbed and install requirements
++RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
++    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && \
++    conda create -n testbed python=3.12 && \
++    . /opt/conda/etc/profile.d/conda.sh && \
++    conda activate testbed && \
++    python -m pip install --no-cache-dir -r /tmp/requirements.txt
++
++# Install browser dependencies
++RUN apt-get update && apt-get install -y \
++    chromium-browser \
++    fonts-liberation \
++    fonts-noto-color-emoji \
++    libnss3-tools \
++    libatk-bridge2.0-0 \
++    libnss3 \
++    libxcomposite1 \
++    libxrandr2 \
++    libxdamage1 \
++    libxkbcommon0 \
++    libgbm1 \
++    libasound2 \
++    libpangocairo-1.0-0 \
++    libgtk-3-0 \
++    --no-install-recommends
++
++# Install Xvfb, Fluxbox, and VNC tools
++RUN apt-get update && apt-get install -y \
++    xvfb \
++    fluxbox \
++    x11vnc \
++    novnc \
++    websockify \
++    --no-install-recommends
++
++# Install GNOME/GTK-related dependencies for proper GUI support
++RUN apt-get update && apt-get install -y \
++    gnome-settings-daemon \
++    gnome-session-bin \
++    gnome-control-center \
++    dconf-cli \
++    libgtk-3-0 \
++    libgdk-pixbuf2.0-0 \
++    libpangocairo-1.0-0 \
++    libatk1.0-0 \
++    --no-install-recommends
++
++# Install libraries to fix Xvfb-related issues
++RUN apt-get update && apt-get install -y \
++    libsecret-1-0 \
++    --no-install-recommends
++
++# Install dependencies related to tests
++RUN apt-get update && apt-get install -y \
++    mkcert \
++    watchman \
++    python3-pyqt5 \
++    ffmpeg \
++    --no-install-recommends
++
++# Install nginx
++RUN apt-get install -y \
++    nginx \
++    --no-install-recommends
++# install ruby
++RUN gpg --keyserver hkp://keyserver.ubuntu.com --recv-keys 409B6B1796C275462A1703113804BB82D39DC0E3 7D2BAF1CF37B13E2069D6956105BD0E739499BDB && \
++    curl -sSL https://get.rvm.io | bash -s stable && \
++    usermod -a -G rvm root && \
++    echo 'rvm_project_rvmrc=0' >> ~/.rvmrc
++# Install ruby; 3.3.4 for expensify; 3.2.4 for pusher-fake
++RUN bash -lc 'rvm install 3.2.4 && \
++    rvm install 3.3.4 && \
++    rvm alias create default 3.3.4'
++
++# Build tool-chain for Ruby native extensions
++RUN apt-get update && apt-get install -y \
++    build-essential \
++    libssl-dev \
++    pkg-config \
++    zlib1g-dev \
++    libreadline-dev \
++    libyaml-dev \
++    --no-install-recommends
++
++# install pusher and pusher-fake gems
++RUN bash -c 'source /etc/profile.d/rvm.sh && rvm use 3.2.4 do gem install pusher:2.0.3 pusher-fake:6.0.0'
++
++# Generate self-signed certificate with CN=pusher_proxy
++RUN mkdir -p /etc/nginx/ssl && \
++    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
++    -keyout /etc/nginx/ssl/pusher.key \
++    -out /etc/nginx/ssl/pusher.crt \
++    -subj "/C=US/ST=State/L=City/O=Organization/CN=ws-mt1.pusher.com"
++
++# Clone the GitHub repository into /app/expensify
++# RUN mkdir -p -m 0700 ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts
++RUN git clone https://github.com/Expensify/App.git /app/expensify --single-branch
++
++# Install NVM and Node.js
++RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash && \
++    . "$NVM_DIR/nvm.sh"
++
++# Install Pip and Pipx
++COPY requirements.txt .
++RUN curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
++    python3.12 get-pip.py && \
++    python3.12 -m pip install --upgrade pip && \
++    python3.12 -m pip install --no-cache-dir --ignore-installed -r requirements.txt && \
++    python3.12 -m pipx ensurepath && \
++    /bin/bash -c "source /root/.bashrc"
++ENV PATH="/root/.local/bin:$PATH"
++
++# Install ansible
++RUN python3.12 -m pipx install --include-deps ansible==11.1.0
++
++# Install Playwright browser binaries in the global environment
++RUN python3.12 -m playwright install --with-deps
++
++# Install mitmdump, mitmproxy, and inject dependencies
++COPY requirements.txt .
++RUN python3.12 -m pipx install mitmproxy==11.0.2 && \
++    python3.12 -m pipx runpip mitmproxy install -r requirements.txt
++
++# Install pytest, dependencies, and browser drivers
++COPY requirements.txt .
++RUN python3.12 -m pipx install pytest==8.3.4 && \
++    python3.12 -m pipx runpip pytest install -r requirements.txt
++
++# Create the /app/tests/ directory
++RUN mkdir -p /app/tests
++
++# Copy files into the /app/tests/ directory
++COPY issues/ /app/tests/issues/
++COPY runtime_utils/ /app/tests/utils/
++COPY runtime_scripts/setup_expensify.yml /app/tests/setup_expensify.yml
++COPY runtime_scripts/setup_mitmproxy.yml /app/tests/setup_mitmproxy.yml
++COPY runtime_scripts/run_tests.yml /app/tests/run_tests.yml
++COPY runtime_scripts/run.sh /app/tests/run.sh
++COPY runtime_scripts/replay.py /app/tests/replay.py
++COPY runtime_scripts/rewrite_test.py /app/tests/rewrite_test.py
++COPY runtime_scripts/npm_fix.py /app/expensify/npm_fix.py
++COPY runtime_scripts/pusher_nginx.conf /etc/nginx/nginx.conf
++RUN chmod +x /app/tests/run.sh
++WORKDIR /app/expensify
++
++# Expose the NoVNC and VNC ports
++EXPOSE 5901
++EXPOSE 5900
++
++# Create python alias
++RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 && \
++    update-alternatives --set python /usr/bin/python3
++
++RUN echo "source /opt/conda/etc/profile.d/conda.sh" >> ~/.bashrc && \
++    echo "conda activate testbed" >> ~/.bashrc
+diff --git a/project/swelancer/Dockerfile_aarch64_monolith b/project/swelancer/Dockerfile_aarch64_monolith
+new file mode 100644
+index 0000000..67bdaaa
+--- /dev/null
++++ b/project/swelancer/Dockerfile_aarch64_monolith
+@@ -0,0 +1,6 @@
++FROM swelancer_aarch64:latest
++
++ENV RUNTIME_SETUP="true"
++
++ENTRYPOINT ["/bin/bash", "-l", "-c"]
++CMD ["/app/tests/run.sh"]
+diff --git a/project/swelancer/Dockerfile_aarch64_per_task b/project/swelancer/Dockerfile_aarch64_per_task
+new file mode 100644
+index 0000000..5fe0a44
+--- /dev/null
++++ b/project/swelancer/Dockerfile_aarch64_per_task
+@@ -0,0 +1,9 @@
++FROM swelancer_aarch64:latest
++
++ARG ISSUE_ID
++ENV ISSUE_ID=${ISSUE_ID}
++
++RUN ansible-playbook -i "localhost," --connection=local /app/tests/setup_expensify.yml
++
++ENTRYPOINT ["/bin/bash", "-l", "-c"]
++CMD ["/app/tests/run.sh"]
+diff --git a/project/swelancer/scripts/build_images.py b/project/swelancer/scripts/build_images.py
+index 2565cba..1d6e7da 100755
+--- a/project/swelancer/scripts/build_images.py
++++ b/project/swelancer/scripts/build_images.py
+@@ -39,11 +39,12 @@ def run(cmd: list[str], cwd: Path) -> None:
+     subprocess.run(cmd, cwd=cwd, check=True)
+ 
+ 
+-def build_base_image() -> None:
+-    """Build the common x86 base image (swelancer_x86)."""
++def build_base_image(arch: str) -> None:
++    """Build the common base image (swelancer_[x86|aarch64])."""
+ 
+-    logging.info("Building Docker base image swelancer_x86")
+-    dockerfile = get_root() / "Dockerfile_x86_base"
++    logging.info(f"Building Docker base image swelancer_{arch}")
++    dockerfile_name = f"Dockerfile_{arch}_base"
++    dockerfile = get_root() / dockerfile_name
+ 
+     assert dockerfile.is_file(), f"Required Dockerfile not found: {dockerfile}"
+ 
+@@ -52,9 +53,9 @@ def build_base_image() -> None:
+         "buildx",
+         "build",
+         "-f",
+-        "Dockerfile_x86_base",
++        dockerfile_name,
+         "--platform",
+-        "linux/amd64",
++        "linux/amd64" if arch == "x86" else "linux/arm64",
+     ]
+ 
+     ssh_sock = os.environ.get("SSH_AUTH_SOCK")
+@@ -62,16 +63,17 @@ def build_base_image() -> None:
+     if ssh_sock:
+         cmd += ["--ssh", f"default={ssh_sock}"]
+ 
+-    cmd += ["-t", "swelancer_x86:latest", "."]
++    cmd += ["-t", f"swelancer_{arch}:latest", "."]
+ 
+     run(cmd, cwd=get_root())
+ 
+ 
+-def build_issue_image(issue_id: str, tag: str) -> None:
+-    """Build the per-issue image (swelancer_x86_<ISSUE_ID>)."""
++def build_issue_image(issue_id: str, tag: str, arch: str) -> None:
++    """Build the per-issue image (swelancer_[x86|aarch64]_<ISSUE_ID>)."""
+ 
+     logging.info("Building Docker image for issue %s", issue_id)
+-    dockerfile = get_root() / "Dockerfile_x86_per_task"
++    dockerfile_name = f"Dockerfile_{arch}_per_task"
++    dockerfile = get_root() / dockerfile_name
+ 
+     assert dockerfile.is_file(), f"Required Dockerfile not found: {dockerfile}"
+ 
+@@ -82,22 +84,23 @@ def build_issue_image(issue_id: str, tag: str) -> None:
+         "--build-arg",
+         f"ISSUE_ID={issue_id}",
+         "-f",
+-        "Dockerfile_x86_per_task",
++        dockerfile_name,
+         "--platform",
+-        "linux/amd64",
++        "linux/amd64" if arch == "x86" else "linux/arm64",
+         "-t",
+-        f"swelancer_x86_{issue_id}:{tag}",
++        f"swelancer_{arch}_{issue_id}:{tag}",
+         ".",
+     ]
+ 
+     run(cmd, cwd=get_root())
+ 
+ 
+-def build_monolith_image(tag: str) -> None:
++def build_monolith_image(tag: str, arch: str) -> None:
+     """Build the monolith image"""
+ 
+     logging.info("Building Monolith Docker image")
+-    dockerfile = get_root() / "Dockerfile_x86_monolith"
++    dockerfile_name = f"Dockerfile_{arch}_monolith"
++    dockerfile = get_root() / dockerfile_name
+ 
+     assert dockerfile.is_file(), f"Required Dockerfile not found: {dockerfile}"
+ 
+@@ -106,77 +109,77 @@ def build_monolith_image(tag: str) -> None:
+         "buildx",
+         "build",
+         "-f",
+-        "Dockerfile_x86_monolith",
++        dockerfile_name,
+         "--platform",
+-        "linux/amd64",
++        "linux/amd64" if arch == "x86" else "linux/arm64",
+         "-t",
+-        f"swelancer_x86_monolith:{tag}",
++        f"swelancer_{arch}_monolith:{tag}",
+         ".",
+     ]
+ 
+     run(cmd, cwd=get_root())
+ 
+ 
+-def push_image(issue_id: str, tag: str, registry: str) -> None:
++def push_image(issue_id: str, tag: str, registry: str, arch: str) -> None:
+     """Push the per-issue image to the container registry."""
+ 
+     logging.info("Pushing image for issue %s to %s", issue_id, registry)
+ 
+-    local_tag = f"swelancer_x86_{issue_id}:{tag}"
+-    remote_tag = f"{registry}/swelancer_x86_{issue_id}:{tag}"
++    local_tag = f"swelancer_{arch}_{issue_id}:{tag}"
++    remote_tag = f"{registry}/swelancer_{arch}_{issue_id}:{tag}"
+ 
+     run(["docker", "tag", local_tag, remote_tag], cwd=get_root())
+     run(["docker", "push", remote_tag], cwd=get_root())
+ 
+ 
+-def push_monolith_image(tag: str, registry: str) -> None:
++def push_monolith_image(tag: str, registry: str, arch: str) -> None:
+     """Push the monolith image to the container registry."""
+ 
+     logging.info("Pushing monolith image to %s", registry)
+ 
+-    local_tag = f"swelancer_x86_monolith:{tag}"
+-    remote_tag = f"{registry}/swelancer_x86_monolith:{tag}"
++    local_tag = f"swelancer_{arch}_monolith:{tag}"
++    remote_tag = f"{registry}/swelancer_{arch}_monolith:{tag}"
+ 
+     run(["docker", "tag", local_tag, remote_tag], cwd=get_root())
+     run(["docker", "push", remote_tag], cwd=get_root())
+ 
+ 
+-def issue_worker(issue_id: str, push: bool, cleanup: bool, tag: str, registry: str) -> None:
++def issue_worker(issue_id: str, push: bool, cleanup: bool, tag: str, registry: str, arch: str) -> None:
+     logging.info("Worker started for issue %s", issue_id)
+ 
+-    build_issue_image(issue_id, tag)
++    build_issue_image(issue_id, tag, arch)
+     if push:
+-        push_image(issue_id, tag, registry)
++        push_image(issue_id, tag, registry, arch)
+ 
+     if cleanup:
+-        logging.info("Removing image swelancer_x86_%s:%s", issue_id, tag)
+-        run(["docker", "rmi", f"swelancer_x86_{issue_id}:{tag}"], cwd=get_root())
++        logging.info("Removing image swelancer_%s_%s:%s", arch, issue_id, tag)
++        run(["docker", "rmi", f"swelancer_{arch}_{issue_id}:{tag}"], cwd=get_root())
+ 
+ 
+-def monolith_worker(push: bool, cleanup: bool, tag: str, registry: str) -> None:
+-    logging.info("Building monolithic image swelancer_x86_monolith")
++def monolith_worker(push: bool, cleanup: bool, tag: str, registry: str, arch: str) -> None:
++    logging.info("Building monolithic image swelancer_%s_monolith", arch)
+ 
+-    build_monolith_image(tag)
++    build_monolith_image(tag, arch)
+     if push:
+-        push_monolith_image(tag, registry)
++        push_monolith_image(tag, registry, arch)
+ 
+     if cleanup:
+-        logging.info("Removing image swelancer_x86_monolith:%s", tag)
+-        run(["docker", "rmi", f"swelancer_x86_monolith:{tag}"], cwd=get_root())
++        logging.info("Removing image swelancer_%s_monolith:%s", arch, tag)
++        run(["docker", "rmi", f"swelancer_{arch}_monolith:{tag}"], cwd=get_root())
+ 
+ 
+-def worker(issue_id: str, push: bool, cleanup: bool, tag: str, registry: str) -> None:
++def worker(issue_id: str, push: bool, cleanup: bool, tag: str, registry: str, arch: str) -> None:
+     """Build an issue image, push it, and optionally remove it afterwards."""
+ 
+     if issue_id == "monolith":
+-        monolith_worker(push, cleanup, tag, registry)
++        monolith_worker(push, cleanup, tag, registry, arch)
+     else:
+-        issue_worker(issue_id, push, cleanup, tag, registry)
++        issue_worker(issue_id, push, cleanup, tag, registry, arch)
+ 
+ 
+ def main() -> None:
+     parser = argparse.ArgumentParser(
+-        description="Build the x86 base image and per-issue images, tagging them with the specified tag (default: latest)."
++        description="Build the base image and per-issue images, tagging them with the specified tag (default: latest)."
+     )
+     parser.add_argument(
+         "issue_ids",
+@@ -203,6 +206,15 @@ def main() -> None:
+         action="store_true",
+         help="Delete per-issue images after a successful build.",
+     )
++    parser.add_argument(
++        "-a",
++        "--arch",
++        dest="arch",
++        type=str,
++        choices=["x86", "aarch64"],
++        default="x86",
++        help="Sets Docker image architecture (default: x86).",
++    )
+     parser.add_argument(
+         "--skip-push",
+         dest="skip_push",
+@@ -225,7 +237,7 @@ def main() -> None:
+     if not issues_dir.is_dir():
+         sys.exit("No issues/ directory found")
+ 
+-    build_base_image()
++    build_base_image(args.arch)
+ 
+     issue_ids = args.issue_ids or [p.name for p in sorted(issues_dir.iterdir()) if p.is_dir()]
+ 
+@@ -234,11 +246,11 @@ def main() -> None:
+ 
+     if args.workers <= 1 or len(issue_ids) <= 1:
+         for issue in issue_ids:
+-            worker(issue, push, cleanup, tag, registry)
++            worker(issue, push, cleanup, tag, registry, args.arch)
+     else:
+         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+             pool.map(
+-                lambda iid: worker(iid, push, cleanup, tag, registry),
++                lambda iid: worker(iid, push, cleanup, tag, registry, args.arch),
+                 issue_ids,
+             )
+ 

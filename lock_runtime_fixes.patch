@@ -1,0 +1,241 @@
+diff --git a/project/common/alcatraz/alcatraz/clusters/local.py b/project/common/alcatraz/alcatraz/clusters/local.py
+index af39ed9..ca5d0fd 100644
+--- a/project/common/alcatraz/alcatraz/clusters/local.py
++++ b/project/common/alcatraz/alcatraz/clusters/local.py
+@@ -375,6 +375,49 @@ class BaseAlcatrazCluster(ABC):
+     async def _get_docker_client(self) -> DockerClient:
+         raise NotImplementedError()
+ 
++    @staticmethod
++    def _safe_remove_container(container: Container) -> None:
++        try:
++            container.remove(force=True)
++        except NotFound:
++            logger.warning("Container already removed during cleanup: %s", container.id)
++        except APIError as e:
++            # Treat 404 as benign: another cleanup path may have removed it first.
++            if getattr(e, "status_code", None) == 404:
++                logger.warning("Container already removed during cleanup (API 404): %s", container.id)
++                return
++            raise
++
++    @staticmethod
++    def _safe_stop_container(container: Container) -> None:
++        try:
++            container.stop()
++        except NotFound:
++            logger.warning("Container already gone before stop during cleanup: %s", container.id)
++        except APIError as e:
++            if getattr(e, "status_code", None) == 404:
++                logger.warning(
++                    "Container already gone before stop during cleanup (API 404): %s",
++                    container.id,
++                )
++                return
++            raise
++
++    @staticmethod
++    def _safe_remove_network(network: Network) -> None:
++        try:
++            network.remove()
++        except NotFound:
++            logger.warning("Network already removed during cleanup: %s", network.name)
++        except APIError as e:
++            if getattr(e, "status_code", None) == 404:
++                logger.warning(
++                    "Network already removed during cleanup (API 404): %s",
++                    network.name,
++                )
++                return
++            raise
++
+     # @tenacity.retry(
+     #     wait=tenacity.wait_fixed(1),
+     #     retry=tenacity.retry_if_exception_type(APIError),
+@@ -414,7 +457,7 @@ class BaseAlcatrazCluster(ABC):
+             if isinstance(self, LocalCluster):
+                 # Add the container to the exit stack so it gets removed when we're done.
+                 self._exit_stack.push_async_callback(
+-                    lambda: asyncio.to_thread(ctr.remove, force=True)
++                    lambda: asyncio.to_thread(self._safe_remove_container, ctr)
+                 )
+             # Also free our host port leases when we're done with this container.
+             self._exit_stack.push(stack.__exit__)
+@@ -610,7 +653,7 @@ class BaseAlcatrazCluster(ABC):
+                 raise
+             if isinstance(self, LocalCluster):
+                 self._exit_stack.push_async_callback(
+-                    lambda: asyncio.to_thread(self.docker_network.remove)
++                    lambda: asyncio.to_thread(self._safe_remove_network, self.docker_network)
+                 )
+ 
+         self.containers: list[Container] = []
+@@ -1075,10 +1118,13 @@ class BaseAlcatrazCluster(ABC):
+         connection_files = await self._jupyter_list_connection_files()
+         if len(connection_files) > 0:
+             return connection_files[0]
+ 
+         self._exit_stack.callback(asyncio.create_task(self._jupyter_start_kernel()).cancel)
+ 
+-        async with asyncio.timeout(120):
++        jupyter_kernel_startup_timeout = float(
++            os.getenv("ALCATRAZ_JUPYTER_KERNEL_STARTUP_TIMEOUT_SEC", "300")
++        )
++        async with asyncio.timeout(jupyter_kernel_startup_timeout):
+             # Poll in runtime_dir until we find the connection file path.
+             while True:
+                 connection_files = await self._jupyter_list_connection_files()
+@@ -1670,16 +1713,16 @@ class BaseAlcatrazCluster(ABC):
+         for network in new_networks:
+             if isinstance(self, LocalCluster):
+                 self._exit_stack.push_async_callback(
+-                    lambda network=network: asyncio.to_thread(network.remove)  # type: ignore
++                    lambda network=network: asyncio.to_thread(self._safe_remove_network, network)  # type: ignore
+                 )
+ 
+         for ctr in docker_compose_containers:
+             if isinstance(self, LocalCluster):
+                 self._exit_stack.push_async_callback(
+-                    lambda ctr=ctr: asyncio.to_thread(ctr.remove, force=True)  # type: ignore
++                    lambda ctr=ctr: asyncio.to_thread(self._safe_remove_container, ctr)  # type: ignore
+                 )
+                 self._exit_stack.push_async_callback(
+-                    lambda ctr=ctr: asyncio.to_thread(ctr.stop)  # type: ignore
++                    lambda ctr=ctr: asyncio.to_thread(self._safe_stop_container, ctr)  # type: ignore
+                 )
+ 
+         # If docker-compose has an external network, we've already connected to it and are done.
+@@ -1768,10 +1811,43 @@ class BaseAlcatrazCluster(ABC):
+         return {"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode}
+ 
+ 
+-garbage_collector_leader_lock_path = Path.home() / ".alcatraz"
+-docker_resource_locks_folder_path = (
+-    Path.home() / ".alcatraz" / "local_cluster_docker_resource_locks"
+-)
++def _get_writable_lock_root() -> Path:
++    env_dir = os.getenv("ALCATRAZ_LOCK_ROOT")
++    candidates: list[Path] = []
++    if env_dir:
++        candidates.append(Path(env_dir).expanduser())
++    candidates.extend(
++        [
++            Path.home() / ".alcatraz",
++            Path(tempfile.gettempdir()) / "alcatraz" / (os.getenv("USER") or "default"),
++        ]
++    )
++
++    seen: set[Path] = set()
++    last_error: OSError | None = None
++    for lock_root in candidates:
++        if lock_root in seen:
++            continue
++        seen.add(lock_root)
++        try:
++            lock_root.mkdir(parents=True, exist_ok=True)
++            probe = lock_root / ".write_probe"
++            with open(probe, "w"):
++                pass
++            probe.unlink(missing_ok=True)
++            return lock_root
++        except OSError as e:
++            last_error = e
++            logger.warning("Unable to use lock root %s: %s", lock_root, e)
++
++    raise RuntimeError(
++        "No writable alcatraz lock directory found. "
++        "Set ALCATRAZ_LOCK_ROOT to a writable path."
++    ) from last_error
++
++
++garbage_collector_leader_lock_path = _get_writable_lock_root()
++docker_resource_locks_folder_path = garbage_collector_leader_lock_path / "local_cluster_docker_resource_locks"
+ os.makedirs(docker_resource_locks_folder_path, exist_ok=True)
+ 
+ 
+diff --git a/project/common/nanoeval/nanoeval/_aiomonitor.py b/project/common/nanoeval/nanoeval/_aiomonitor.py
+index 64f28a0..d0c69b3 100644
+--- a/project/common/nanoeval/nanoeval/_aiomonitor.py
++++ b/project/common/nanoeval/nanoeval/_aiomonitor.py
+@@ -2,8 +2,10 @@ from __future__ import annotations
+ 
+ import asyncio
+ import logging
++import os
+ import random
+ import socket
++import tempfile
+ from contextlib import contextmanager
+ from pathlib import Path
+ from typing import Generator
+@@ -13,11 +15,47 @@ import aiomonitor
+ logger = logging.getLogger(__name__)
+ 
+ 
++def _get_writable_ports_dir() -> Path:
++    env_dir = os.getenv("NANOEVAL_PORTS_DIR")
++    candidates: list[Path] = []
++    if env_dir:
++        candidates.append(Path(env_dir).expanduser())
++    candidates.extend(
++        [
++            Path("/tmp/nanoeval/ports"),
++            Path(tempfile.gettempdir()) / "nanoeval" / "ports",
++            Path.home() / ".nanoeval" / "ports",
++        ]
++    )
++
++    seen: set[Path] = set()
++    last_error: OSError | None = None
++    for ports_dir in candidates:
++        if ports_dir in seen:
++            continue
++        seen.add(ports_dir)
++        try:
++            ports_dir.mkdir(parents=True, exist_ok=True)
++            probe = ports_dir / ".write_probe"
++            with open(probe, "w"):
++                pass
++            probe.unlink(missing_ok=True)
++            return ports_dir
++        except OSError as e:
++            last_error = e
++            logger.warning("Unable to use lock root %s: %s", ports_dir, e)
++            continue
++
++    raise RuntimeError(
++        "No writable aiomonitor lock directory found. "
++        "Set NANOEVAL_PORTS_DIR to a writable path."
++    ) from last_error
++
++
+ @contextmanager
+ def _lock_and_yield_port() -> Generator[int, None, None]:
+-    ports_dir = Path("/tmp/nanoeval/ports")
+-    ports_dir.mkdir(parents=True, exist_ok=True)
+-    while True:
++    ports_dir = _get_writable_ports_dir()
++    for _ in range(20_000):
+         port = random.randint(10000, 20000)
+         port_file = ports_dir / str(port)
+         try:
+@@ -25,12 +63,17 @@ def _lock_and_yield_port() -> Generator[int, None, None]:
+                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                     s.bind(("127.0.0.1", port))
+                 yield port
+-                break
+-        except (FileExistsError, OSError):
++                return
++        except FileExistsError:
++            continue
++        except PermissionError as e:
++            raise RuntimeError(f"Unable to use lock root {ports_dir}: {e}") from e
++        except OSError:
+             continue
+         finally:
+             if port_file.exists():
+                 port_file.unlink()
++    raise RuntimeError(f"Unable to allocate aiomonitor port lock under {ports_dir}")
+ 
+ 
+ @contextmanager

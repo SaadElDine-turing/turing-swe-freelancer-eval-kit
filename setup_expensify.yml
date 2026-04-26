@@ -1,0 +1,191 @@
+---
+- hosts: localhost
+  connection: local
+  tasks:
+    - name: Ensure ISSUE_ID environment variable is set
+      assert:
+        that:
+          - lookup('env', 'ISSUE_ID') is not none
+        fail_msg: "The environment variable ISSUE_ID is not set."
+    
+    - name: Verify the flow file does not contain PII or unnecessary information
+      shell: |
+        ISSUE_ID={{ lookup('env', 'ISSUE_ID') }}
+        python3.12 -m pip install --no-cache-dir mitmproxy==11.0.2
+        python3.12 /app/tests/utils/check_flows.py --path=/app/tests/issues/$ISSUE_ID/ --prefixes=flow.mitm
+        python3.12 -m pip uninstall -y mitmproxy
+    
+    - name: Create a new log directory for the ISSUE_ID
+      file:
+        path: "/app/tests/logs/{{ lookup('env', 'ISSUE_ID') }}"
+        state: directory
+        mode: '0755'
+    
+    - name: Create a new attempts directory for the ISSUE_ID
+      file:
+        path: "/app/tests/attempts/{{ lookup('env', 'ISSUE_ID') }}"
+        state: directory
+        mode: '0755'
+
+    - name: Generate empty certs store
+      shell: mkdir -p /root/.pki/nssdb && certutil --empty-password -d $HOME/.pki/nssdb -N
+    
+    - name: Generate CA authority using mkcert
+      shell: |
+        mkcert -install
+        mkcert -cert-file certificate.pem -key-file key.pem dev.new.expensify.com localhost 127.0.0.1
+      args:
+        chdir: /app/expensify/config/webpack/
+    
+    - name: Get the commit ID for the issue
+      shell: |
+        ISSUE_ID={{ lookup('env', 'ISSUE_ID') }}
+        cat /app/tests/issues/$ISSUE_ID/commit_id.txt
+      register: commit_id
+    
+    - name: Get the git tag for the issue
+      shell: |
+        ISSUE_ID={{ lookup('env', 'ISSUE_ID') }}
+        cat /app/tests/issues/$ISSUE_ID/git_tag.txt
+      register: git_tag
+
+    # - name: Checkout to the commit ID
+    #   shell: |
+    #     git reset --hard origin/main
+    #     git fetch --all
+    #     git checkout {{ commit_id.stdout }}
+    #   args:
+    #     chdir: /app/expensify
+
+    - name: Checkout to the commit ID (robust)
+      shell: |
+        set -euo pipefail
+        git reset --hard origin/main
+        git fetch --all --tags --prune
+        git fetch --unshallow || true
+        git checkout {{ commit_id.stdout }} || (
+          echo "Direct checkout failed; fetching commit explicitly..."
+          git fetch origin {{ commit_id.stdout }}
+          git checkout {{ commit_id.stdout }}
+        )
+      args:
+        chdir: /app/expensify
+        executable: /bin/bash
+
+    - name: Slurp revert_command.txt
+      slurp:
+        src: "/app/tests/issues/{{ lookup('env','ISSUE_ID') }}/revert_command.txt"
+      register: revert_command
+
+    - name: Run revert command if not empty
+      shell: |
+        set -euo pipefail
+        ISSUE_ID={{ lookup('env','ISSUE_ID') }}
+        cmd={{ (revert_command.content | b64decode | trim) | quote }}
+
+        # Some task packs provide a relative patch path; normalize it to the issue folder.
+        if [[ "$cmd" == "git apply bug_reintroduce.patch" || "$cmd" == "git apply ./bug_reintroduce.patch" ]]; then
+          cmd="git apply /app/tests/issues/$ISSUE_ID/bug_reintroduce.patch"
+        fi
+
+        eval "$cmd"
+      args:
+        chdir: /app/expensify
+        executable: /bin/bash
+      when: (revert_command.content | b64decode | trim) | length > 0
+
+    - name: Slurp bug_reintroduce.patch
+      slurp:
+        src: "/app/tests/issues/{{ lookup('env','ISSUE_ID') }}/bug_reintroduce.patch"
+      register: patch_content
+
+    - name: Verify bug_reintroduce.patch applies cleanly
+      shell: |
+        set -euo pipefail
+        ISSUE_ID={{ lookup('env','ISSUE_ID') }}
+        git apply --check "/app/tests/issues/$ISSUE_ID/bug_reintroduce.patch"
+      args:
+        chdir: /app/expensify
+        executable: /bin/bash
+      when:
+        - (revert_command.content | b64decode | trim) | length == 0
+        - (patch_content.content | b64decode | trim) | length > 0
+
+    - name: Apply bug_reintroduce.patch
+      shell: |
+        set -euo pipefail
+        ISSUE_ID={{ lookup('env','ISSUE_ID') }}
+        git apply "/app/tests/issues/$ISSUE_ID/bug_reintroduce.patch"
+      args:
+        chdir: /app/expensify
+        executable: /bin/bash
+      when:
+        - (revert_command.content | b64decode | trim) | length == 0
+        - (patch_content.content | b64decode | trim) | length > 0
+    
+    - name: Apply npm_fix.py file to remove integrity checks
+      shell: |
+        python3.12 /app/expensify/npm_fix.py
+      args:
+        chdir: /app/expensify
+    
+    - name: Remove node_modules folder
+      file:
+        path: /app/expensify/node_modules
+        state: absent 
+    
+    - name: Remove .npmrc file
+      file:
+        path: /app/expensify/.npmrc
+        state: absent
+
+    - name: Use nvm to install specific Node.js version (using '.nvmrc')
+      shell: |
+        source /root/.nvm/nvm.sh
+        nvm install
+      args:
+        chdir: /app/expensify
+        executable: /bin/bash
+    
+    # - name: Use npm version to set git tag if it exists
+    #   shell: |
+    #     source /root/.nvm/nvm.sh
+    #     npm version {{ git_tag.stdout }} --no-git-tag-version
+    #   args:
+    #     chdir: /app/expensify
+    #     executable: /bin/bash
+    #   when: git_tag.stdout != ''
+
+    - name: Use npm version to set git tag if it exists
+      shell: |
+        set -euo pipefail
+        source /root/.nvm/nvm.sh
+        CURRENT_VERSION="$(node -p "require('./package.json').version")"
+        TARGET_VERSION="{{ git_tag.stdout | trim }}"
+        if [ -n "$TARGET_VERSION" ] && [ "$CURRENT_VERSION" != "$TARGET_VERSION" ]; then
+          npm version "$TARGET_VERSION" --no-git-tag-version
+        else
+          echo "Skipping npm version: already at $CURRENT_VERSION"
+        fi
+      args:
+        chdir: /app/expensify
+        executable: /bin/bash
+      when: git_tag.stdout | trim != ''
+
+    - name: Install jq
+      apt:
+        name: jq
+        state: present
+        update_cache: yes
+
+    - name: Install node modules via npm
+      shell: |
+        source /root/.nvm/nvm.sh
+        npm install --no-cache
+      args:
+        chdir: /app/expensify
+        executable: /bin/bash
+      retries: 3
+      delay: 5
+      register: result
+      until: result is not failed

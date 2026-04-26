@@ -1,0 +1,101 @@
+diff --git a/project/swelancer/runtime_scripts/run_tests.yml b/project/swelancer/runtime_scripts/run_tests.yml
+index 6aa0b35..d553dc3 100644
+--- a/project/swelancer/runtime_scripts/run_tests.yml
++++ b/project/swelancer/runtime_scripts/run_tests.yml
+@@ -32,34 +32,6 @@
+     #   ignore_errors: yes
+     #   when: 
+     #     - (patch_content.content | b64decode | trim) | length > 0
+-    
+-    - name: Check if the webpack.dev.ts file exists
+-      ansible.builtin.stat:
+-        path: /app/expensify/config/webpack/webpack.dev.ts
+-      register: webpack_file_ts
+-
+-    - name: Compile Development Webpack (TypeScript)
+-      shell: |
+-        source /root/.nvm/nvm.sh
+-        npx webpack --config ./config/webpack/webpack.dev.ts
+-      args:
+-        chdir: /app/expensify
+-        executable: /bin/bash
+-      when: webpack_file_ts.stat.exists
+-      
+-    - name: Check if the webpack.dev.js file exists
+-      ansible.builtin.stat:
+-        path: /app/expensify/config/webpack/webpack.dev.js
+-      register: webpack_file_js
+-      
+-    - name: Compile Development Webpack (JavaScript)
+-      shell: |
+-        source /root/.nvm/nvm.sh
+-        npx webpack --config ./config/webpack/webpack.dev.js
+-      args:
+-        chdir: /app/expensify
+-        executable: /bin/bash
+-      when: webpack_file_js.stat.exists
+ 
+     - name: Ensure ISSUE_ID environment variable is set
+       assert:
+diff --git a/project/swelancer/runtime_scripts/setup_expensify.yml b/project/swelancer/runtime_scripts/setup_expensify.yml
+index c7f5b0f..eb4ea4a 100644
+--- a/project/swelancer/runtime_scripts/setup_expensify.yml
++++ b/project/swelancer/runtime_scripts/setup_expensify.yml
+@@ -51,7 +51,8 @@
+ 
+     - name: Checkout to the commit ID
+       shell: |
+-        git reset --hard origin/master
++        git reset --hard origin/main
++        git fetch --all
+         git checkout {{ commit_id.stdout }}
+       args:
+         chdir: /app/expensify
+@@ -117,6 +117,12 @@
+         executable: /bin/bash
+       when: git_tag.stdout != ''
+ 
++    - name: Install jq
++      apt:
++        name: jq
++        state: present
++        update_cache: yes
++
+     - name: Install node modules via npm
+       shell: |
+         source /root/.nvm/nvm.sh
+@@ -127,32 +133,4 @@
+       retries: 3
+       delay: 5
+       register: result
+-      until: result is not failed
+-
+-    - name: Check if the webpack.dev.ts file exists
+-      ansible.builtin.stat:
+-        path: /app/expensify/config/webpack/webpack.dev.ts
+-      register: webpack_file_ts
+-
+-    - name: Compile Development Webpack (TypeScript)
+-      shell: |
+-        source /root/.nvm/nvm.sh
+-        npx webpack --config ./config/webpack/webpack.dev.ts
+-      args:
+-        chdir: /app/expensify
+-        executable: /bin/bash
+-      when: webpack_file_ts.stat.exists
+-    
+-    - name: Check if the webpack.dev.js file exists
+-      ansible.builtin.stat:
+-        path: /app/expensify/config/webpack/webpack.dev.js
+-      register: webpack_file_js
+-    
+-    - name: Compile Development Webpack (JavaScript)
+-      shell: |
+-        source /root/.nvm/nvm.sh
+-        npx webpack --config ./config/webpack/webpack.dev.js
+-      args:
+-        chdir: /app/expensify
+-        executable: /bin/bash
+-      when: webpack_file_js.stat.exists
++      until: result is not failed
+\ No newline at end of file

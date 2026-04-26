@@ -1,0 +1,184 @@
+diff --git a/project/swelancer/runtime_scripts/replay.py b/project/swelancer/runtime_scripts/replay.py
+index b7e87cb..c238276 100644
+--- a/project/swelancer/runtime_scripts/replay.py
++++ b/project/swelancer/runtime_scripts/replay.py
+@@ -717,8 +717,8 @@ class ExpensifyReplay:
+             dict: Dictionary of headers.
+         """
+         if isinstance(headers, dict):
+-            return headers
+-        return {k: v for k, v in headers}
++            return {k.lower() if isinstance(k, bytes) else k.lower().encode(): v for k, v in headers.items()}
++        return {k.lower(): v for k, v in headers}
+ 
+     def is_multipart_form_data(self, headers):
+         """
+diff --git a/project/swelancer/runtime_utils/online_guard.py b/project/swelancer/runtime_utils/online_guard.py
+index dfd6cca..0bf0f65 100644
+--- a/project/swelancer/runtime_utils/online_guard.py
++++ b/project/swelancer/runtime_utils/online_guard.py
+@@ -1,5 +1,5 @@
+ """
+-Stub Firebase-related endpoints so tests run deterministically.
++Stub Firebase and Pusher-related endpoints so tests run deterministically.
+ 
+ Exports
+ -------
+@@ -16,7 +16,6 @@ import sys
+ import traceback
+ from typing import Optional, TYPE_CHECKING, Any, Union
+ 
+-# Set up logging
+ logging.basicConfig(
+     level=logging.DEBUG,
+     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+@@ -24,14 +23,11 @@ logging.basicConfig(
+ )
+ logger = logging.getLogger(__name__)
+ 
+-# Use TYPE_CHECKING to avoid importing Playwright at runtime
+ if TYPE_CHECKING:
+     from playwright.async_api import BrowserContext as AsyncBrowserContext, Page as AsyncPage, Route as AsyncRoute, Request as AsyncRequest
+     from playwright.sync_api import BrowserContext as SyncBrowserContext, Page as SyncPage, Route as SyncRoute, Request as SyncRequest
+ 
+-# --------------------------------------------------------------------------- #
+-# Dummy payloads returned by Firebase endpoints
+-# --------------------------------------------------------------------------- #
++# Firebase mock responses
+ _FAKE_INSTALLATIONS = json.dumps(
+     {
+         "fid": "CI_FAKE_FID",
+@@ -43,6 +39,12 @@ _FAKE_REMOTECONFIG = json.dumps({"entries": {}})
+ _FAKE_APPCHECK = json.dumps({"token": "CI_FAKE_APP_CHECK", "ttl": "3600s"})
+ _FAKE_FIREBASE_LOG = "{}"
+ 
++# Pusher mock responses
++_FAKE_PUSHER_AUTH = json.dumps({"auth": "fake_key:fake_signature"})
++
++# API Ping response (for NetInfo reachability check)
++_FAKE_PING_RESPONSE = json.dumps({"jsonCode": 200})
++
+ 
+ def _mock_body(url: str) -> Optional[str]:
+     """Return mock response body based on URL pattern."""
+@@ -70,6 +72,16 @@ def _mock_body(url: str) -> Optional[str]:
+             logger.debug("Returning fake firebase log")
+             return _FAKE_FIREBASE_LOG
+ 
++        # Pusher authentication endpoints
++        if "authenticatepusher" in url_lower:
++            logger.debug("Returning fake pusher auth")
++            return _FAKE_PUSHER_AUTH
++
++        # API Ping endpoint (used by NetInfo for reachability check)
++        if "api/ping" in url_lower or "api?command=ping" in url_lower:
++            logger.debug("Returning fake ping response for NetInfo reachability")
++            return _FAKE_PING_RESPONSE
++
+         logger.debug(f"No mock data for URL: {url}")
+         return None
+ 
+@@ -78,13 +90,10 @@ def _mock_body(url: str) -> Optional[str]:
+         return None
+ 
+ 
+-# --------------------------------------------------------------------------- #
+-# Async Playwright helper
+-# --------------------------------------------------------------------------- #
+ async def install_online_guard_async(
+-    context: Any, page: Any  # Using Any to avoid type issues during import
++    context: Any, page: Any
+ ) -> None:
+-    """Attach a route that fulfils Firebase requests with dummy JSON."""
++    """Attach a route that fulfils Firebase requests with dummy JSON and force online status."""
+     try:
+         from playwright.async_api import Route as AsyncRoute, Request as AsyncRequest
+     except ImportError as e:
+@@ -100,15 +109,33 @@ async def install_online_guard_async(
+             await route.continue_()
+ 
+     await context.route("**/*", _router)
++    
++    # Inject script to force navigator.onLine to always return true
++    await context.add_init_script("""
++        // Override navigator.onLine to always return true
++        Object.defineProperty(navigator, 'onLine', {
++            get: function() { return true; },
++            configurable: true
++        });
++        
++        // Prevent offline events from firing
++        window.addEventListener('offline', function(e) {
++            e.stopImmediatePropagation();
++        }, true);
++        
++        // Force online event periodically
++        setInterval(function() {
++            window.dispatchEvent(new Event('online'));
++        }, 5000);
++        
++        console.log('[OnlineGuard] Forced online status enabled');
++    """)
+ 
+ 
+-# --------------------------------------------------------------------------- #
+-# Sync Playwright helper
+-# --------------------------------------------------------------------------- #
+ def install_online_guard_sync(
+-    context: Any, page: Any  # Using Any to avoid type issues during import
++    context: Any, page: Any
+ ) -> None:
+-    """Attach a route that fulfils Firebase requests with dummy JSON."""
++    """Attach a route that fulfils Firebase requests with dummy JSON and force online status."""
+     try:
+         from playwright.sync_api import Route as SyncRoute, Request as SyncRequest
+     except ImportError as e:
+@@ -124,9 +151,28 @@ def install_online_guard_sync(
+             route.continue_()
+ 
+     context.route("**/*", _router)
++    
++    # Inject script to force navigator.onLine to always return true
++    # This prevents "You appear to be offline" messages
++    context.add_init_script("""
++        // Override navigator.onLine to always return true
++        Object.defineProperty(navigator, 'onLine', {
++            get: function() { return true; },
++            configurable: true
++        });
++        
++        // Prevent offline events from firing
++        window.addEventListener('offline', function(e) {
++            e.stopImmediatePropagation();
++        }, true);
++        
++        // Force online event periodically
++        setInterval(function() {
++            window.dispatchEvent(new Event('online'));
++        }, 5000);
++        
++        console.log('[OnlineGuard] Forced online status enabled');
++    """)
+ 
+ 
+ __all__ = ["install_online_guard_async", "install_online_guard_sync"]
+-
+-# """
+-# Stub Firebase-related endpoints so tests run deterministically.
+
+diff --git a/project/swelancer/swelancer/eval.py b/project/swelancer/swelancer/eval.py
+index 8dd5d6e..8a13342 100644
+--- a/project/swelancer/swelancer/eval.py
++++ b/project/swelancer/swelancer/eval.py
+@@ -476,7 +476,10 @@ class SWELancerEval(PythonCodingEval):
+             destinations=["group"],
+         )
+         tasks = pd.read_csv(PATH_TO_SWE_LANCER_TASKS)
+-        tasks["proposals"] = tasks["proposals"].fillna("")  # pandas reads empty as float nan
++        # Pandas may load empty text cells as float NaN; normalize to strings before prompt building.
++        for col in ["title", "description", "proposals"]:
++            if col in tasks.columns:
++                tasks[col] = tasks[col].fillna("").astype(str)
+ 
+         if self.split != "all":
+             tasks = tasks[tasks["set"] == self.split]

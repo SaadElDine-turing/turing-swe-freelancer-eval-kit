@@ -1,0 +1,1 @@
+WORK="/Users/saadeldine.eletter/work/swe-freelancer-eval-colleague" ./validate_delivery_batch.sh "/Users/saadeldine.eletter/work/swe-freelancer-eval-colleague/test_delivery" test_delivery
